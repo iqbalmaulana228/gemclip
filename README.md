@@ -3,7 +3,8 @@
 Aplikasi lokal untuk mengubah video YouTube panjang menjadi klip pendek. Hasilnya bisa vertikal (9:16), persegi (1:1), atau lanskap (16:9).
 
 Cara kerjanya:
-- **Gemini** membuat transkrip ucapan, memilih momen terbaik, lalu menulis judul, hook, caption, dan hashtag.
+- **Caption YouTube** dipakai sebagai transkrip jika video punya caption. Jika tidak, **Gemini** mentranskrip audionya.
+- **Gemini** memilih momen terbaik, lalu menulis judul, hook, caption, dan hashtag.
 - **Gemini** juga melacak posisi wajah pembicara, sehingga area crop mengikuti orang yang berbicara.
 - **ffmpeg** dan **OpenCV** merender hasilnya menjadi MP4 dengan caption yang dibakar ke video.
 
@@ -68,9 +69,9 @@ Gaya caption mengatur warna, ketebalan, dan efek teks. Hook ditampilkan di bagia
 
 ## Cara analisis: transkrip atau video
 
-Transkripsi selalu dilakukan Gemini, apa pun pilihan analisisnya. Audio dikirim ke Gemini, lalu hasilnya dipakai untuk caption karaoke dan, dalam mode transkrip, sebagai bahan pemilihan momen.
+Transkrip diambil dari caption YouTube jika ada. Jika tidak, Gemini mentranskrip audio. Pilihan analisis di bawah tidak mengubah sumber transkrip, hanya cara Gemini memilih momen.
 
-- **Transkrip** (default): transkrip dikirim sebagai teks dalam satu permintaan. Ini cepat dan murah, dan video tidak perlu diunggah untuk pemilihan momen. Kelemahannya, Gemini tidak melihat visual atau nada suara, sehingga momen yang bergantung pada tampilan layar atau ekspresi bisa terlewat.
+- **Transkrip** (default): transkrip dikirim sebagai teks dalam satu permintaan. Setiap kalimat diberi nomor, dan Gemini menjawab dengan nomor kalimat, bukan waktu. Batas klip karena itu selalu jatuh di awal dan akhir kalimat. Ini cepat dan murah, dan video tidak perlu diunggah untuk pemilihan momen. Kelemahannya, Gemini tidak melihat visual atau nada suara, sehingga momen yang bergantung pada tampilan layar atau ekspresi bisa terlewat.
 - **Video**: Gemini menonton video secara langsung. Ini lebih kaya konteks, tetapi jauh lebih mahal dan lebih lambat.
 
 Sebagai perkiraan kasar, untuk video 20 menit mode transkrip memakai sekitar 7 ribu token untuk pemilihan momen, sedangkan mode video memakai sekitar 320 hingga 360 ribu token.
@@ -90,7 +91,7 @@ Beberapa hal yang perlu diperhatikan:
 
 Unduhan dan transkrip disimpan di `output/cache/<id-video>/` dan dipakai ulang:
 - Job kedua untuk video yang sama tidak mengunduh ulang dan tidak mentranskrip ulang. Mengubah jumlah klip, durasi, rasio, gaya caption, atau instruksi juga tidak memicu ulang.
-- Mengubah rentang **Mulai / Selesai** atau `GEMINI_MODEL` memerlukan transkrip baru, karena transkrip disimpan per rentang dan per model.
+- Transkrip disimpan per sumber (caption YouTube atau model Gemini) dan per rentang. Mengubah rentang **Mulai / Selesai** atau `GEMINI_MODEL` memerlukan transkrip baru.
 - Transkrip kosong tidak disimpan, supaya kesalahan sesaat tidak terus terulang.
 - Cache tidak dihapus otomatis. Video 1 jam di 720p bisa berukuran ratusan MB, jadi hapus folder `output/cache/<id-video>` yang sudah tidak dipakai.
 - Link yang tidak dikenali sebagai video YouTube tidak di-cache.
@@ -105,13 +106,15 @@ Unduhan dan transkrip disimpan di `output/cache/<id-video>/` dan dipakai ulang:
 | `CLIP_MIN_SEC` / `CLIP_MAX_SEC` | `30` / `60` | Durasi klip default untuk pemanggilan API. Halaman web punya preset durasi sendiri. |
 | `DEFAULT_CLIP_COUNT` | `10` | Jumlah klip default untuk pemanggilan API (maksimum 20). Halaman web memulai dari 4 klip. |
 | `MAX_VIDEO_HEIGHT` | `720` | Resolusi maksimum video yang diunduh. |
+| `USE_YOUTUBE_CAPTIONS` | `1` | Pakai caption YouTube lebih dulu. Isi `0` untuk selalu memakai Gemini. |
 
 ## Catatan biaya, privasi, dan batasan
 
 - **Gemini:** free tier punya kuota dan batas harian. Paid tier tidak membatasi durasi video. Cek di AI Studio sebelum memproses banyak video.
 - **Perkiraan token pelacakan wajah:** satu frame dikirim tiap 2 detik, jadi klip 60 detik mengirim sekitar 30 frame. Perkiraan kasarnya 8 sampai 15 ribu token per klip 60 detik.
 - **Privasi:** audio, video (atau potongannya), dan frame dikirim ke Google untuk diproses. Unduhan dan render tetap berjalan di komputermu.
-- **Ketepatan caption karaoke:** Gemini memberi waktu per kalimat, bukan per kata. Waktu tiap kata diperkirakan dari panjang kata di dalam kalimat, jadi caption per kata bisa sedikit meleset.
+- **Ketepatan caption karaoke:** caption otomatis YouTube punya waktu per kata, dan dipakai bila tersedia. Caption manual dan transkrip Gemini hanya punya waktu per kalimat, jadi waktu tiap kata diperkirakan dari panjang kata dan bisa sedikit meleset.
+- **Caption YouTube:** tidak semua video punya caption, dan caption otomatis bisa salah ketik. Jika caption tidak ada atau gagal diambil, aplikasi memakai Gemini.
 - **Pelacakan wajah:** wajah yang sangat kecil, membelakangi kamera, atau sering keluar frame bisa membuat crop kembali ke tengah. Jika pelacakan gagal, klip tetap dibuat dengan crop tengah.
 - **Gerak kamera:** crop diam selama wajah masih berada dalam zona toleransi 15% dari lebar crop, lalu bergerak pelan mengikuti wajah. Ini meredam getaran dari deteksi.
 - **Sumber video:** hanya video YouTube publik yang didukung.
@@ -128,6 +131,7 @@ Unduhan dan transkrip disimpan di `output/cache/<id-video>/` dan dipakai ulang:
 - **Proses sangat lambat**: persempit rentang waktu, atau kurangi jumlah klip.
 - **Hasil pemilihan momen kurang bagus**: coba model Gemini yang lebih besar di `GEMINI_MODEL`.
 - **Video lama sudah berubah atau ingin mengunduh ulang**: hapus folder `output/cache/<id-video>`. Job berikutnya akan mengunduh dan mentranskrip dari awal.
+- **Ingin selalu memakai Gemini untuk transkrip**: isi `USE_YOUTUBE_CAPTIONS=0` di `.env`, lalu jalankan ulang aplikasi.
 
 ## Pengembangan
 
@@ -144,7 +148,8 @@ Tes yang butuh ffmpeg dilewati otomatis jika ffmpeg tidak ditemukan. Tes tidak m
 |---|---|
 | `gemclip/cache.py` | Simpan dan pakai ulang unduhan dan transkrip per ID video |
 | `gemclip/download.py` | Unduh video dengan yt-dlp |
-| `gemclip/gemini.py` | Unggah berkas ke Gemini, tunggu sampai siap, dan hapus berkas sementara |
+| `gemclip/gemini.py` | Klien Gemini dengan timeout, retry untuk error sementara, unggah berkas, dan hapus berkas sementara |
+| `gemclip/ytcaptions.py` | Ambil caption YouTube lewat yt-dlp, baca penanda waktu per kata, dan buang baris yang diulang |
 | `gemclip/transcribe.py` | Transkrip ucapan dengan Gemini per potongan audio, lalu bagi waktu per kata |
 | `gemclip/chunks.py` | Bagi rentang waktu, potong video untuk analisis, dan ambil audio untuk transkripsi |
 | `gemclip/moments.py` | Kirim tiap potongan ke Gemini, validasi jawaban, gabungkan dan sesuaikan batas klip ke batas kata |

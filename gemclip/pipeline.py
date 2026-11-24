@@ -6,6 +6,7 @@ from typing import Callable
 
 from .cache import (
     CACHE_DIRNAME,
+    CAPTION_SOURCE,
     load_download,
     load_transcript,
     save_download,
@@ -22,6 +23,7 @@ from .moments import find_moments
 from .render import check_ffmpeg, render_clip
 from .reframe import RATIOS
 from .transcribe import transcribe
+from .ytcaptions import fetch_youtube_captions
 
 Progress = Callable[[str, float], None]
 
@@ -108,25 +110,41 @@ def run_job(
     full_video = lo <= 0.0 and hi >= duration - 0.5
     clip_range = None if full_video else (lo, hi)
 
-    cache_path = transcript_path(cache_dir, settings.gemini_model, lo, hi) if cache_dir else None
-    cached = load_transcript(cache_path) if cache_path else None
+    # Urutan sumber transkrip: cache caption, cache Gemini, caption YouTube, lalu transkripsi Gemini.
+    gemini_cache = transcript_path(cache_dir, settings.gemini_model, lo, hi) if cache_dir else None
+    caption_cache = transcript_path(cache_dir, CAPTION_SOURCE, lo, hi) if cache_dir else None
+    use_captions = caption_cache is not None and settings.use_youtube_captions
+
+    cached = load_transcript(caption_cache) if use_captions else None
+    if cached is None and gemini_cache is not None:
+        cached = load_transcript(gemini_cache)
+
     if cached is not None:
         segments, words = cached
         progress("Memakai transkrip tersimpan", 0.3)
     else:
-        progress("Membuat transkrip dengan Gemini", 0.12)
-        segments, words = transcribe(
-            video_path=info.path,
-            api_key=settings.gemini_api_key,
-            model=settings.gemini_model,
-            work_dir=job_dir,
-            duration=duration,
-            clip_range=clip_range,
-            progress=lambda msg, frac: progress(msg, 0.12 + 0.2 * frac),
-        )
-        # Transkrip kosong tidak disimpan, supaya kesalahan sesaat tidak terus terulang.
-        if cache_path and words:
-            save_transcript(cache_path, segments, words)
+        captions = None
+        if use_captions:
+            progress("Mengambil caption YouTube", 0.06)
+            captions = fetch_youtube_captions(url, job_dir / "subs", lo, hi)
+        if captions is not None:
+            segments, words = captions
+            save_transcript(caption_cache, segments, words)
+            progress("Memakai caption YouTube", 0.3)
+        else:
+            progress("Membuat transkrip dengan Gemini", 0.12)
+            segments, words = transcribe(
+                video_path=info.path,
+                api_key=settings.gemini_api_key,
+                model=settings.gemini_model,
+                work_dir=job_dir,
+                duration=duration,
+                clip_range=clip_range,
+                progress=lambda msg, frac: progress(msg, 0.12 + 0.2 * frac),
+            )
+            # Transkrip kosong tidak disimpan, supaya kesalahan sesaat tidak terus terulang.
+            if gemini_cache is not None and words:
+                save_transcript(gemini_cache, segments, words)
     if not words:
         raise RuntimeError("Tidak ada ucapan yang terdeteksi di rentang video ini.")
 

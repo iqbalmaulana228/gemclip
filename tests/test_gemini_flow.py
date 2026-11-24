@@ -41,7 +41,7 @@ class _FakeClient:
     final_state = "ACTIVE"
     instances: list["_FakeClient"] = []
 
-    def __init__(self, api_key):
+    def __init__(self, api_key, **kwargs):
         assert api_key == "test-key"
         self.files = _FakeFiles(self.final_state)
         self.models = _FakeModels(self.payload)
@@ -222,17 +222,20 @@ def test_find_moments_rejects_empty_range(fake_genai, tmp_path):
         )
 
 
-def test_transcript_mode_sends_single_text_request(fake_genai, tmp_path):
+def test_transcript_mode_sends_numbered_sentences(fake_genai, tmp_path):
+    # Gemini menjawab dengan nomor kalimat, bukan waktu. Nomor 0 hanya sebagian masuk rentang.
     fake_genai.payload = json.dumps(
         [
-            {"start_sec": 600.0, "end_sec": 640.0, "viral_score": 88, "title": "A", "hook": "H",
+            {"first": 1, "last": 2, "viral_score": 88, "title": "A", "hook": "H",
              "caption": "C", "hashtags": ["a"]},
-            {"start_sec": 700.0, "end_sec": 740.0, "viral_score": 60, "title": "B", "hook": "H",
+            {"first": 2, "last": 2, "viral_score": 60, "title": "B", "hook": "H",
              "caption": "C", "hashtags": ["b"]},
         ]
     )
     segments = [
+        Segment(start=480.0, end=510.0, text="sebagian masuk"),
         Segment(start=600.0, end=650.0, text="kalimat pertama"),
+        Segment(start=650.0, end=700.0, text="kalimat kedua"),
         Segment(start=1500.0, end=1520.0, text="di luar rentang"),
     ]
     result = moments_mod.find_moments(
@@ -255,7 +258,8 @@ def test_transcript_mode_sends_single_text_request(fake_genai, tmp_path):
     assert client.files.uploaded == [], "mode transkrip tidak boleh mengunggah video"
     contents = client.models.calls[0]["contents"]
     assert isinstance(contents, str)
-    assert "[600.0-650.0] kalimat pertama" in contents  # waktu tetap absolut
+    assert "1 [600.0-650.0] kalimat pertama" in contents  # nomor dan waktu absolut
+    assert "0 [480.0-510.0] sebagian masuk" in contents
     assert "di luar rentang" not in contents
     assert "fokus pada tips" in contents
     assert [m.score for m in result] == [88, 60]

@@ -9,6 +9,7 @@ from .models import Segment, VideoInfo, Word
 
 CACHE_DIRNAME = "cache"
 INFO_FILE = "info.json"
+CAPTION_SOURCE = "youtube-captions"  # nama sumber untuk transkrip dari caption YouTube, bukan model Gemini
 
 # ID video YouTube selalu 11 karakter. Bentuk URL yang umum: watch?v=, youtu.be/, shorts/, embed/, live/.
 _YOUTUBE_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/embed/|/live/)([A-Za-z0-9_-]{11})")
@@ -52,10 +53,14 @@ def save_download(cache_dir: Path, info: VideoInfo) -> None:
     _write_atomic(cache_dir / INFO_FILE, json.dumps(payload, ensure_ascii=False))
 
 
-def transcript_path(cache_dir: Path, model: str, lo: float, hi: float) -> Path:
-    """Berkas transkrip untuk satu model dan satu rentang. Ganti model atau rentang berarti transkrip ulang."""
-    safe_model = re.sub(r"[^A-Za-z0-9._-]", "_", model)
-    return cache_dir / f"transcript_{safe_model}_{lo:.1f}_{hi:.1f}.json"
+def transcript_path(cache_dir: Path, source: str, lo: float, hi: float) -> Path:
+    """
+    Berkas transkrip untuk satu sumber dan satu rentang.
+
+    Sumber adalah nama model Gemini, atau CAPTION_SOURCE untuk caption YouTube. Ganti sumber atau rentang berarti transkrip ulang.
+    """
+    safe_source = re.sub(r"[^A-Za-z0-9._-]", "_", source)
+    return cache_dir / f"transcript_{safe_source}_{lo:.1f}_{hi:.1f}.json"
 
 
 def load_transcript(path: Path) -> tuple[list[Segment], list[Word]] | None:

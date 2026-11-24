@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from gemclip import gemini as gemini_mod
 from gemclip import transcribe as transcribe_mod
 from gemclip.chunks import extract_audio
 from gemclip.transcribe import parse_pieces, split_words, transcribe
@@ -64,7 +65,7 @@ def fake_gemini(monkeypatch):
     state = {"payloads": [], "clients": [], "extracted": []}
 
     class FakeClient:
-        def __init__(self, api_key):
+        def __init__(self, api_key, **kwargs):
             assert api_key == "test-key"
             self.files = _Files()
             self.models = _Models(state["payloads"])
@@ -75,7 +76,7 @@ def fake_gemini(monkeypatch):
         dest.write_bytes(b"mp3")
         return dest
 
-    monkeypatch.setattr(transcribe_mod.genai, "Client", FakeClient)
+    monkeypatch.setattr(gemini_mod.genai, "Client", FakeClient)
     monkeypatch.setattr(transcribe_mod, "extract_audio", fake_extract)
     return state
 

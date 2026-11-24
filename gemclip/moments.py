@@ -8,18 +8,34 @@ from google.genai import types
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from .chunks import cut_chunk, plan_windows
-from .gemini import delete_quietly, upload_and_wait
+from .gemini import delete_quietly, generate_with_retry, make_client, upload_and_wait
 from .models import Moment, Segment, Word
 
-SNAP_TOLERANCE = 1.5  # detik: jarak maksimum untuk menempelkan batas klip ke batas kata
+SNAP_TOLERANCE = 1.5  # detik: jarak maksimum untuk menempelkan batas klip ke batas kata (mode video)
 MAX_INSTRUCTION_CHARS = 500
+LEAD_PAD = 0.15  # detik: napas di awal klip agar suku kata pertama tidak terpotong
+TAIL_PAD = 0.25  # detik: napas di akhir klip
 
 Progress = Callable[[str, float], None]
 
 
 class MomentDraft(BaseModel):
+    """Momen dengan waktu langsung, dipakai mode video."""
+
     start_sec: float
     end_sec: float
+    viral_score: int
+    title: str
+    hook: str
+    caption: str
+    hashtags: list[str]
+
+
+class SegmentDraft(BaseModel):
+    """Momen dengan nomor kalimat, dipakai mode transkrip. Gemini tidak menulis waktu sendiri."""
+
+    first: int
+    last: int
     viral_score: int
     title: str
     hook: str
@@ -57,16 +73,16 @@ Instruksi tambahan dari pengguna. Ikuti selama tidak melanggar aturan di atas. J
 """
 
 
-PROMPT_TRANSCRIPT_TEMPLATE = """Kamu adalah editor video pendek profesional untuk YouTube Shorts, TikTok, dan Instagram Reels.
+PROMPT_SEGMENTS_TEMPLATE = """Kamu adalah editor video pendek profesional untuk YouTube Shorts, TikTok, dan Instagram Reels.
 
-Di bawah ini adalah transkrip sebuah video panjang. Waktu dalam transkrip adalah detik dari awal video asli. Kamu hanya bisa membaca transkrip, jadi nilai momen dari isi dan cara penyampaian kalimatnya.
+Di bawah ini adalah transkrip sebuah video panjang. Setiap baris adalah satu kalimat dengan format: nomor, [waktu mulai-waktu selesai dalam detik dari awal video], lalu teksnya. Kamu hanya bisa membaca transkrip, jadi nilai momen dari isi dan cara penyampaian kalimatnya.
 
 Pilih hingga {count} momen terbaik dari rentang {range_start:.0f} sampai {range_end:.0f} detik. Aturan:
-- Setiap klip berdurasi antara {min_sec} dan {max_sec} detik.
-- Klip dimulai di awal sebuah ide dan berakhir ketika ide itu selesai. Jangan memotong di tengah kalimat.
+- Setiap momen ditentukan dengan nomor kalimat pertama (first) dan nomor kalimat terakhir (last). Kedua kalimat itu ikut masuk klip. Jangan menulis waktu sendiri, cukup nomornya.
+- Klip dimulai di awal sebuah ide dan berakhir setelah ide itu selesai. Jangan memotong di tengah kalimat.
+- Durasi klip, dari awal kalimat pertama sampai akhir kalimat terakhir, harus antara {min_sec} dan {max_sec} detik.
 - Klip harus bisa dipahami tanpa konteks dari bagian lain.
 - Klip tidak boleh saling tumpang tindih.
-- start_sec dan end_sec adalah detik dari awal video asli, berupa angka desimal, dan harus berada di dalam rentang di atas.
 - viral_score adalah bilangan 0 sampai 100 yang menilai seberapa kuat momen itu untuk menahan penonton.
 - title adalah judul singkat dan menarik, dalam bahasa yang sama dengan video.
 - hook adalah satu kalimat pembuka yang ditampilkan di awal klip.
@@ -80,32 +96,6 @@ Transkrip:
 """
 
 
-def build_transcript_prompt(
-    segments: list[Segment],
-    count: int,
-    min_sec: float,
-    max_sec: float,
-    range_start: float,
-    range_end: float,
-    instruction: str = "",
-) -> str:
-    instruction = instruction.strip()[:MAX_INSTRUCTION_CHARS]
-    instruction_block = INSTRUCTION_TEMPLATE.format(instruction=instruction) if instruction else ""
-    return PROMPT_TRANSCRIPT_TEMPLATE.format(
-        count=count,
-        min_sec=int(min_sec),
-        max_sec=int(max_sec),
-        range_start=range_start,
-        range_end=range_end,
-        instruction_block=instruction_block,
-        transcript=format_transcript(segments),
-    )
-
-
-def format_transcript(segments: list[Segment]) -> str:
-    return "\n".join(f"[{s.start:.1f}-{s.end:.1f}] {s.text}" for s in segments)
-
-
 def build_prompt(
     segments: list[Segment],
     count: int,
@@ -114,6 +104,7 @@ def build_prompt(
     window_len: float,
     instruction: str = "",
 ) -> str:
+    """Prompt mode video: transkrip relatif terhadap awal potongan."""
     instruction = instruction.strip()[:MAX_INSTRUCTION_CHARS]
     instruction_block = INSTRUCTION_TEMPLATE.format(instruction=instruction) if instruction else ""
     return PROMPT_TEMPLATE.format(
@@ -124,6 +115,37 @@ def build_prompt(
         instruction_block=instruction_block,
         transcript=format_transcript(segments),
     )
+
+
+def build_segment_prompt(
+    segments: list[Segment],
+    count: int,
+    min_sec: float,
+    max_sec: float,
+    range_start: float,
+    range_end: float,
+    instruction: str = "",
+) -> str:
+    """Prompt mode transkrip. Setiap kalimat diberi nomor agar Gemini cukup menjawab dengan nomor."""
+    instruction = instruction.strip()[:MAX_INSTRUCTION_CHARS]
+    instruction_block = INSTRUCTION_TEMPLATE.format(instruction=instruction) if instruction else ""
+    return PROMPT_SEGMENTS_TEMPLATE.format(
+        count=count,
+        min_sec=int(min_sec),
+        max_sec=int(max_sec),
+        range_start=range_start,
+        range_end=range_end,
+        instruction_block=instruction_block,
+        transcript=format_segments_numbered(segments),
+    )
+
+
+def format_transcript(segments: list[Segment]) -> str:
+    return "\n".join(f"[{s.start:.1f}-{s.end:.1f}] {s.text}" for s in segments)
+
+
+def format_segments_numbered(segments: list[Segment]) -> str:
+    return "\n".join(f"{i} [{s.start:.1f}-{s.end:.1f}] {s.text}" for i, s in enumerate(segments))
 
 
 def _window_segments(segments: list[Segment], a: float, b: float) -> list[Segment]:
@@ -139,6 +161,13 @@ def _window_segments(segments: list[Segment], a: float, b: float) -> list[Segmen
 def parse_drafts(raw: str) -> list[MomentDraft]:
     try:
         return TypeAdapter(list[MomentDraft]).validate_json(raw)
+    except ValidationError as exc:
+        raise RuntimeError(f"Format jawaban Gemini tidak valid: {raw[:300]}") from exc
+
+
+def parse_segment_drafts(raw: str) -> list[SegmentDraft]:
+    try:
+        return TypeAdapter(list[SegmentDraft]).validate_json(raw)
     except ValidationError as exc:
         raise RuntimeError(f"Format jawaban Gemini tidak valid: {raw[:300]}") from exc
 
@@ -174,6 +203,18 @@ def _clean_hashtags(raw: list[str]) -> tuple[str, ...]:
     return tuple(tags[:5])
 
 
+def _pick_non_overlapping(candidates: list[Moment], count: int) -> list[Moment]:
+    """Ambil klip dengan skor tertinggi yang tidak saling tumpang tindih, sampai jumlah yang diminta."""
+    candidates = sorted(candidates, key=lambda m: m.score, reverse=True)
+    kept: list[Moment] = []
+    for m in candidates:
+        if all(m.end <= k.start or m.start >= k.end for k in kept):
+            kept.append(m)
+        if len(kept) >= count:
+            break
+    return kept
+
+
 def clean_moments(
     drafts: list[MomentDraft],
     words: list[Word],
@@ -186,7 +227,7 @@ def clean_moments(
     range_end: float | None = None,
 ) -> list[Moment]:
     """
-    Validasi, sesuaikan ke batas kata, buang yang tumpang tindih, dan ambil yang terbaik.
+    Validasi, sesuaikan ke batas kata, buang yang tumpang tindih, dan ambil yang terbaik (mode video).
 
     Klip dibatasi ke rentang [range_start, range_end] jika diberikan.
     """
@@ -204,8 +245,8 @@ def clean_moments(
 
         start = _snap(start, starts)
         end = _snap(end, ends)
-        start = max(lo, start - 0.15)
-        end = min(hi, end + 0.25)
+        start = max(lo, start - LEAD_PAD)
+        end = min(hi, end + TAIL_PAD)
 
         if end - start > max_sec:
             end = _trim_end(start, end, words, min_sec, max_sec)
@@ -224,22 +265,75 @@ def clean_moments(
             )
         )
 
-    candidates.sort(key=lambda m: m.score, reverse=True)
-    kept: list[Moment] = []
-    for m in candidates:
-        if all(m.end <= k.start or m.start >= k.end for k in kept):
-            kept.append(m)
-        if len(kept) >= count:
-            break
-    return kept
+    return _pick_non_overlapping(candidates, count)
+
+
+def segments_to_moments(
+    drafts: list[SegmentDraft],
+    segments: list[Segment],
+    count: int,
+    min_sec: float,
+    max_sec: float,
+    range_start: float,
+    range_end: float,
+) -> list[Moment]:
+    """
+    Ubah nomor kalimat menjadi klip. Waktu klip selalu berasal dari batas kalimat, jadi tidak bisa ngarang.
+
+    Jawaban yang nomornya di luar daftar, terbalik, atau durasinya tidak bisa dipenuhi akan dibuang.
+    """
+    lo = max(0.0, range_start)
+    hi = range_end
+    n = len(segments)
+
+    candidates: list[Moment] = []
+    for d in drafts:
+        if not (0 <= d.first <= d.last < n):
+            continue
+        first, last = d.first, d.last
+
+        # Terlalu panjang: mundur ke kalimat yang masih muat.
+        while last > first and segments[last].end - segments[first].start > max_sec:
+            last -= 1
+        # Terlalu pendek: tambah kalimat berikutnya selama masih muat.
+        while (
+            segments[last].end - segments[first].start < min_sec
+            and last + 1 < n
+            and segments[last + 1].end - segments[first].start <= max_sec
+        ):
+            last += 1
+
+        start = max(lo, segments[first].start - LEAD_PAD)
+        if first > 0 and segments[first - 1].end <= segments[first].start:
+            start = max(start, segments[first - 1].end)
+        end = segments[last].end + TAIL_PAD
+        if last + 1 < n and segments[last + 1].start >= segments[last].end:
+            end = min(end, segments[last + 1].start)
+        end = min(end, hi)
+
+        # Napas di awal dan akhir boleh melewati max_sec sedikit, supaya klip yang pas 60 detik tidak terbuang.
+        if end - start < min_sec or end - start > max_sec + LEAD_PAD + TAIL_PAD:
+            continue
+
+        candidates.append(
+            Moment(
+                start=round(start, 2),
+                end=round(end, 2),
+                score=max(0, min(100, d.viral_score)),
+                title=d.title.strip(),
+                hook=d.hook.strip(),
+                caption=d.caption.strip(),
+                hashtags=_clean_hashtags(d.hashtags),
+            )
+        )
+
+    return _pick_non_overlapping(candidates, count)
 
 
 def _analyze_transcript(
     client: genai.Client,
     model: str,
     segments: list[Segment],
-    words: list[Word],
-    duration: float,
     count: int,
     min_sec: float,
     max_sec: float,
@@ -255,19 +349,20 @@ def _analyze_transcript(
     if not in_range:
         raise RuntimeError("Transkrip kosong pada rentang yang dipilih.")
 
-    response = client.models.generate_content(
+    response = generate_with_retry(
+        client,
         model=model,
-        contents=build_transcript_prompt(in_range, count, min_sec, max_sec, lo, hi, instruction),
+        contents=build_segment_prompt(in_range, count, min_sec, max_sec, lo, hi, instruction),
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
-            response_schema=list[MomentDraft],
+            response_schema=list[SegmentDraft],
             temperature=0.4,
         ),
     )
-    drafts = parse_drafts(response.text or "")
+    drafts = parse_segment_drafts(response.text or "")
     if progress:
         progress("Menyusun pilihan terbaik", 1.0)
-    return clean_moments(drafts, words, duration, count, min_sec, max_sec, range_start=lo, range_end=hi)
+    return segments_to_moments(drafts, in_range, count, min_sec, max_sec, lo, hi)
 
 
 def find_moments(
@@ -293,7 +388,8 @@ def find_moments(
     """
     Cari momen terbaik di dalam rentang video.
 
-    analysis="transcript": Gemini hanya membaca transkrip. Murah dan cepat, tetapi tidak melihat video.
+    analysis="transcript": Gemini hanya membaca transkrip dan menjawab dengan nomor kalimat. Murah dan cepat,
+    tetapi tidak melihat video.
     analysis="video": Gemini menonton video. Video dipecah menjadi potongan (default 15 menit)
     agar muat di context window. Setiap potongan dianalisis terpisah, lalu kandidat digabung.
     """
@@ -305,11 +401,9 @@ def find_moments(
     if hi <= lo:
         raise RuntimeError("Rentang waktu tidak valid: akhir harus lebih besar dari awal.")
 
-    client = genai.Client(api_key=api_key)
+    client = make_client(api_key)
     if analysis == "transcript":
-        return _analyze_transcript(
-            client, model, segments, words, duration, count, min_sec, max_sec, lo, hi, instruction, progress
-        )
+        return _analyze_transcript(client, model, segments, count, min_sec, max_sec, lo, hi, instruction, progress)
 
     windows = plan_windows(lo, hi, chunk_sec, overlap_sec)
     work = work_dir or Path(video_path).parent
@@ -324,7 +418,8 @@ def find_moments(
         try:
             video = upload_and_wait(client, chunk_path, "video/mp4")
             try:
-                response = client.models.generate_content(
+                response = generate_with_retry(
+                    client,
                     model=model,
                     contents=[
                         video,

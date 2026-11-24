@@ -3,12 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from google import genai
 from google.genai import types
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from .chunks import extract_audio, plan_windows
-from .gemini import delete_quietly, upload_and_wait
+from .gemini import delete_quietly, generate_with_retry, make_client, upload_and_wait
 from .models import Segment, Word
 
 CHUNK_SEC = 900.0  # audio dipecah per sekitar 15 menit agar unggahan dan jawaban tetap kecil
@@ -80,7 +79,7 @@ def transcribe(
     """
     lo, hi = clip_range if clip_range is not None else (0.0, duration)
     windows = plan_windows(lo, hi, CHUNK_SEC, overlap_sec=0.0)
-    client = genai.Client(api_key=api_key)
+    client = make_client(api_key)
 
     segments: list[Segment] = []
     words: list[Word] = []
@@ -93,7 +92,8 @@ def transcribe(
         try:
             audio = upload_and_wait(client, audio_path, "audio/mpeg")
             try:
-                response = client.models.generate_content(
+                response = generate_with_retry(
+                    client,
                     model=model,
                     contents=[audio, TRANSCRIBE_PROMPT],
                     config=types.GenerateContentConfig(

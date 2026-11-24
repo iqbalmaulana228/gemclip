@@ -7,9 +7,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from google import genai
 from google.genai import types
 from pydantic import BaseModel, TypeAdapter, ValidationError
+
+from .gemini import generate_with_retry, make_client
 
 log = logging.getLogger(__name__)
 
@@ -90,8 +91,9 @@ def _request_face_hints(api_key: str, model: str, frames: list[Path]) -> list[Fa
         contents.append(types.Part.from_bytes(data=path.read_bytes(), mime_type="image/jpeg"))
     contents.append(TRACK_PROMPT)
 
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
+    client = make_client(api_key)
+    response = generate_with_retry(
+        client,
         model=model,
         contents=contents,
         config=types.GenerateContentConfig(

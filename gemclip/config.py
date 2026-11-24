@@ -18,6 +18,11 @@ class Settings:
     clip_max_sec: float
     default_clip_count: int
     max_height: int
+    use_youtube_captions: bool = True  # caption YouTube dipakai lebih dulu sebelum transkripsi Gemini
+
+
+def _flag(name: str, default: str) -> bool:
+    return os.getenv(name, default).strip().lower() not in ("0", "false", "no", "off", "")
 
 
 def load_settings() -> Settings:
@@ -29,4 +34,5 @@ def load_settings() -> Settings:
         clip_max_sec=float(os.getenv("CLIP_MAX_SEC", "60")),
         default_clip_count=int(os.getenv("DEFAULT_CLIP_COUNT", "10")),
         max_height=int(os.getenv("MAX_VIDEO_HEIGHT", "720")),
+        use_youtube_captions=_flag("USE_YOUTUBE_CAPTIONS", "1"),
     )

@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from google.genai import types
 
+from gemclip import gemini as gemini_mod
 from gemclip import reframe as reframe_mod
 from gemclip.reframe import crop_centers, crop_width, track_hits
 
@@ -103,11 +104,11 @@ def _patch_gemini(monkeypatch, payload: str = "[]", error: Exception | None = No
             return SimpleNamespace(text=payload)
 
     class FakeClient:
-        def __init__(self, api_key):
+        def __init__(self, api_key, **kwargs):
             assert api_key == "test-key"
             self.models = FakeModels()
 
-    monkeypatch.setattr(reframe_mod.genai, "Client", FakeClient)
+    monkeypatch.setattr(gemini_mod.genai, "Client", FakeClient)
     return calls
 
 
